@@ -1,7 +1,7 @@
 import numpy as np
 from natconst import au, Msun
 
-""" 
+''' 
 Tyler Baines
 March 28, 2019
 
@@ -21,146 +21,160 @@ Input list must have the following format:
     beta       : Flaring Index           |   ntheta_cells_high : # altitude angle near z-axis
     Mdust_Msun : Dust mass in Sol Mass   |   theta_min         : minimum angle 
                                          |   theta_split       : angle grid style change
-"""
+'''
 
-def amr_dust_setup(rin_au, rc_au, rout_au, gamma, H100au, beta, Mdust_Msun,
+
+def dust_grain_weights(logamin_um, logamax_um, na, alpha, matdens):
+    '''
+    This function computes the weightings for a powerlaw distribution: n(a)~a**alpha, a grain size distribution.
+    However, this distribution is to be converted to a grain mass distribution who bin-walls are centered at location
+    sqrt(m_i * m_i+1)
+    '''
+    
+    # convert from grain size distribution to grain mass distribution
+    dustGrainSizeGrid     = 10.**(np.linspace(logamin_um, logamax_um, na))*1e-4 # [cm]
+    dustMassGrainGrid     = (4.*np.pi/3)* matdens*grainSizeGrid**3              # [g] 
+    massDistributionGrid  = dustMassGrainGrid**((alpha - 2.)/3.)
+    
+    # initialize bin-walls of mass distribution and populate with center of walls (geometric mean)
+    dustMassGrainCellWalls       = np.zeros(na+1)
+    dustMassGrainCellWalls[0]    = dustMassGrainGrid[0]
+    dustMassGrainCellWalls[-1]   = dustMassGrainGrid[-1]
+    dustMassGrainCellWalls[1:-1] = np.sqrt(dustMassGrainGrid[1:]*dustMassGrainGrid[:-1])
+    
+    deltaMassGrain = dustMassGrainGrid[1:]-dustMassGrainGrid[:-1]
+    dummy          = (massDistributionGrid*dustMassGrainGrid*deltaMassGrain).sum()
+    
+    # Normalize distribtion
+    massDistributionGrid = massDistributionGrid/dummy
+    
+    # Calculate the weights
+    weights = massDistributionGrid*dustMassGrainGrid*deltaMassGrain
+    return weights 
+
+def vertical_dust_settling(Hg, matdens, gasdens, agrain, tau):
+    ''''''
+    return Hg / np.sqrt(matdens * agrain / (gasdens * Hg * tau))
+
+
+def amr_dust_setup(rin_au, rc_au, rout_au, gamma, H100au, beta, Mdust_Msun, 
+                   logamin_um, logamax_um, alpha, na, matdens,
                    nr_cells_inner, nr_cells_outer, r_scale, nphi_cells,
                    ntheta_cells_low, ntheta_cells_high, theta_min, 
                    theta_split):
-
-        
+    '''
+    '''
+    
     # constants used and coverted to CGS units if required
     r_in     = rin_au * au
     r_out    = rout_au * au
     r_change = r_scale * r_in
     rc       = rc_au * au 
-    R0       = 100 * au
+    R0       = 100. * au
     Mdust    = Mdust_Msun * Msun
     H100     = H100au * au
-    twoPI    = 2 * np.pi
-    Sigma0   = (
-        (Mdust * (gamma - 2)) / 
-        (twoPI * rc**2) / 
-        (np.exp(-(rout_au/rc_au)**(2 - gamma)) - np.exp(-(rin_au/rc_au)**(2 - gamma)))
-    )
-
+    twoPI    = 2. * np.pi
     
-    # ----- Setup radial cell walls ----- #
-
+    '''# ----- Setup radial cell walls ----- #'''
+    
     # Note:
     # to avoid duplication, endpoint is set to FALSE where rchange 
     # will not be accounted for in inner grid but instead recovered in outer
     
-    r_inner = np.linspace(r_in, r_change, nr_cells_inner + 1, False) # inner FINE grid style
-    r_outer = np.geomspace(r_change, r_out, nr_cells_outer + 1)      # outer COARSE grid style
-    r_grid  = np.concatenate([r_inner, r_outer])                     # complete grid of radial cell walls
+    radiusCellWallsInner = np.linspace(r_in, r_change, nr_cells_inner + 1, False)       # inner FINE grid style
+    radiusCellWallsOuter = np.geomspace(r_change, r_out, nr_cells_outer + 1)            # outer COARSE grid style
+    radiusCellWalls      = np.concatenate([radiusCellWallsInner, radiusCellWallsOuter]) # complete grid of radial cell walls
 
-    # ----- Setup polar angle theta cell walls ----- #
-    theta_high     = np.linspace(theta_min, theta_split, ntheta_cells_high + 1, False) # COARSE grid spacing
-    theta_low      = np.linspace(theta_split, np.pi/2, ntheta_cells_low + 1)           # FINE grid spacing near the mid-plane
+    ''' # ----- Setup polar angle theta cell walls ----- #'''
+    thetaCellWallsHigh = np.linspace(theta_min, theta_split, ntheta_cells_high + 1, False) # COARSE grid spacing
+    thetaCellWallsLow  = np.linspace(theta_split, np.pi/2., ntheta_cells_low + 1)       # FINE grid spacing near the mid-plane
 
     # define cell walls above midplane to be reflected (inverted) for each region to be uniform
 
-    theta_above_midplane = np.concatenate([theta_high, theta_low])            # 0 to pi/2 
-    theta_below_midplane = np.pi - theta_above_midplane[::-1][1:]             # pi/2 to pi
-    theta_grid = np.concatenate([theta_above_midplane, theta_below_midplane]) # completed grid of theta cell walls 
+    thetaAboveMidplane = np.concatenate([thetaCellWallsHigh, thetaCellWallsLow])  # 0 to pi/2 
+    thetaBelowMidplane = np.pi - thetaAboveMidplane[::-1][1:]                     # pi/2 to pi
+    thetaCellWalls     = np.concatenate([thetaAboveMidplane, thetaBelowMidplane]) # completed grid of theta cell walls 
 
-    # ----- Setup polar angle phi cell walls ----- #
-    phi_grid = np.linspace(0, twoPI, nphi_cells + 1)
-
-
-    # ----- Find coords of cell walls center ----- #
-    r_center_grid     = 0.5 * (r_grid[:-1] + r_grid[1:])
-    phi_center_grid   = 0.5 * (phi_grid[:-1] + phi_grid[1:])
-    theta_center_grid = 0.5 * (theta_grid[:-1] + theta_grid[1:])
-
-    nr_cen, nphi_cen, ntheta_cen = list(map(lambda x: x.size, [r_center_grid, phi_center_grid, theta_center_grid]))
-    print(f'nr = {nr_cen}, {len(r_grid)}')
-    print(f'nt = {ntheta_cen},{len(theta_grid)}')
-    print(f'np = {nphi_cen},{len(phi_grid)}')
-
-    # ----- Calculate dust density for each cell ----- #
+    '''# ----- Setup polar angle phi cell walls ----- #'''
+    phiCellsWalls = np.linspace(0, twoPI, nphi_cells + 1)
     
-    # Method to avoid looping, although phi array not important because dust model equations do not 
-    # depend on the phi.
-    phi, theta, r_sph = np.meshgrid(phi_center_grid, theta_center_grid, r_center_grid, indexing = 'ij')
+    '''# ----- Find grid of cell walls center and number of cell walls ----- #'''
+    sphericalCoordCellWalls  = [radiusCellWalls, thetaCellWalls, phiCellsWalls]
+    sphericalCellWallCenters = list(map(lambda x: (0.5 * (x[:-1] + x[1:]), x.size - 1), sphericalCoordCellWalls))    
     
-
-
-
-    # spherical to cylindrical coord transform
-    r_cyln = r_sph * np.sin(theta)
-    z      = r_sph * np.cos(theta) 
-
-    # compute scale heights
-    H = H100 * (r_cyln / R0)**beta
+    radiusCellCenters , nrCells     = sphericalCellWallCenters[0]
+    thetaCellCenters  , nthetaCells = sphericalCellWallCenters[1]
+    phiCellCenters    , nphiCells   = sphericalCellWallCenters[2]
     
-    # compute dust surface density
-    Sigma_dust = (
-        Sigma0 * 
-        (r_cyln / rc)**(-gamma) * 
-        np.exp(-(r_cyln / rc)**(2 - gamma))
-    )
-
-    # compute volume dust density 
-    rho_dust_density = (
-        Sigma_dust / (np.sqrt(twoPI) * H) *
-        np.exp(-0.5 * (z / H)**2)
-    )
+    '''# ----- Calculate dust grain mass distribution weights ----- #'''
+    ''' INSERT DUST STUFF HERE '''
+    dustGrainMassWeights = dust_grain_weights(logamin_um, logamax_um, alpha, na, matdens)
     
-    # ----- write files ----- #
-
+    
+    '''# ----- Calculate dust volume density for each cell for a single polar angle ----- #'''
+    # Note: for loops = BORING, Numpy = :D
+    
+    # Dust density is independent of phi which means we can evaluate a single polar angle then tile
+    # Dust density is calculated on a grid using cylindrical coordinates ~ rho(r,z) thus from convert
+    # spherical coords
+    
+    radiusSphericalGrid   , thetaGrid = np.meshgrid(radiusCellCenters, thetaCellCenters)
+    radiusCylindricalGrid , zGrid     = map(lambda r, theta: (r * np.sin(theta), r * np.cos(theta)))
+    
+    '''### INSERT CHECK CONDITI0NS HERE ###'''
+    
+    #Scale the radial components to the disk characteristic size
+    radiusScalingGrid = radiusCylindricalGrid / rc
+    
+    # Function used to value at disk inner and outer bounds
+    viscosityProifile = np.exp(-radiusScalingGrid**(2 - gamma)) 
+    
+    # surface density scaled from the difference of viscosity at the inner region and outer
+    # while the entire grid requires all values
+    
+    initialSurfaceDensity = Mdust * (gamma - 2) / (twoPI * rc**2) / (viscosityProifile[-1] - viscosityProifile[0])
+    surfaceDensityGrid    = initialSurfaceDensity * radiusScalingGrid * viscosityProifile
+    scaleHeightGrid       = H100 * (radiusCylindricalGrid / R0)**beta
+    volumeDensityGrid     = surfaceDensityGrid / (scaleHeightGrid * twoPI**0.5) * np.exp(-0.5 * (zGrid/scaleHeightGrid)**2)
+    '''### INSERT CHECK HERE ###'''
+    
+    '''# ----- Make the full disk density grid ----- #'''
+    diskVolumeDensityGrid = np.tile(volumeDensityGrid.flatten(), nphiCells)
+    
+    '''# ----- write input files ----- #'''
+    
     with open('amr_grid.inp','w') as f:
         # Write formating section
-        f.write('1\n')                              # iformat
-        f.write('0\n')                              # AMR grid style  (0=regular grid, no AMR)
-        f.write('100\n')                            # Coordinate system
-        f.write('0\n')                              # grid info
-        f.write('1 1 1\n')                          # include coordinate: r, phi, theta   #
-        f.write(f'{nr_cen} {nphi_cen} {ntheta_cen}' + '\n') 
+        f.write('1\n')                                    # iformat
+        f.write('0\n')                                    # AMR grid style  (0=regular grid, no AMR)
+        f.write('100\n')                                  # Coordinate system
+        f.write('0\n')                                    # grid info
+        f.write('1 1 1\n')                                # include coordinate: r, phi, theta   #
+        f.write(f'{nrCells} {nthetaCells} {nphiCells}\n') # number of grid cells for each coordinate
 
         # Write grid values on one line
         # line #: a_1 a_2 a_3 ... a_n+1
-        for r in r_grid:
+        for r in radiusCellWalls:
             f.write(f'{r}' + ' ')
+            
         f.write('\n')
-        for phi in phi_grid:
+        
+        for phi in phiCellsWalls:
             f.write(f'{phi}' + ' ')
+            
         f.write('\n')
-        for theta in theta_grid:
+        
+        for theta in thetaCellWalls:
             f.write(f'{theta}' + ' ')
     
-    with open('dust_density.inp', 'w') as f:
-        f.write('1\n')                     # iformat
-        f.write('{}\n'.format(rho_dust_density.size)) # nrcells
-        f.write('1\n')                     # dust speicies
-        
-        for rho in rho_dust_density.flatten():
-            f.write(f'{rho}' + '\n') 
     
-    return 
-
-if __name__ == "__main__":
-    rin_au = 1
-    rc_au = 5
-    rout_au = 20
-    gamma = 1
-    H100au = 10
-    beta = 2
-    Mdust_Msun = 1e-4
-
-    ppdisk = [rin_au, rc_au, rout_au, gamma, H100au, beta, Mdust_Msun]
-
-    nr_cells_inner    = 5
-    nr_cells_outer    = 10
-    r_scale           = 2
-    ntheta_cells_low  = 5
-    ntheta_cells_high = 5
-    theta_split       = np.pi/8
-    theta_min         = 0
-    nphi_cells        = 3
-    spatial_grid = [nr_cells_inner, nr_cells_outer, r_scale, nphi_cells,
-                   ntheta_cells_low, ntheta_cells_high, theta_min, 
-                   theta_split]
-
-    amr_dust_setup(*ppdisk, *spatial_grid)
+    with open('dust_density.inp', 'w') as f:
+        f.write('1\n')                             # iformat
+        f.write(f'{diskVolumeDensityGrid.size}\n') # nrcells
+        f.write('1\n')                             # dust speicies
+        
+        for denisty in diskVolumeDensityGrid:
+            f.write(f'{density}\n') 
+    
+    
+    
